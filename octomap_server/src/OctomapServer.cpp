@@ -274,6 +274,7 @@ void OctomapServer::processBagFile(const std::string & bagfile, const std::strin
     PCQ Q1, Q2;
     PCQ *pQ1 = &Q1, *pQ2=&Q2;
 
+    std::vector<geometry_msgs::TransformStamped> static_tf;
 
     size_t counter = 0;
     ROS_INFO("Processing bag '%s' Topic '%s'",bagfile.c_str(),topic.c_str());
@@ -285,21 +286,47 @@ void OctomapServer::processBagFile(const std::string & bagfile, const std::strin
         }
         for (PCQ::iterator it=pQ1->begin();it!=pQ1->end();it++) {
             sensor_msgs::PointCloud2::ConstPtr pc = *it;
-            if (!m_tfListener.canTransform(pc->header.frame_id,m_worldFrameId,pc->header.stamp)) {
+            std::string error_msg;
+            if (!m_tfListener.canTransform(pc->header.frame_id,m_worldFrameId,pc->header.stamp,&error_msg)) {
+#if 0
+                ROS_INFO("Error: %s",error_msg.c_str());
+#endif
                 pQ2->push_back(pc);
             } else {
                 insertCloudCallback(pc);
             }
         }
         std::swap(pQ1,pQ2);
+#if 0
+        if (pQ1->size()) {
+            ROS_INFO("PQ1 still contains %d element",int(pQ1->size()));
+        }
+#endif
 
         sensor_msgs::PointCloud2::ConstPtr pc = m.instantiate<sensor_msgs::PointCloud2>();
         if ((pc != nullptr) && ((m.getTopic()==topic) || topic.empty())) {
+#if 0
+            ROS_INFO("PC in %s %f",
+                    pc->header.frame_id.c_str(),
+                    pc->header.stamp.toSec());
+#endif
             counter += 1;
             if (counter % 100 == 0) {
                 ROS_INFO("Processed %d clouds",int(counter));
             }
-            if (!m_tfListener.canTransform(pc->header.frame_id,m_worldFrameId,pc->header.stamp)) {
+
+            for (size_t i=0;i<static_tf.size();i++) {
+                tf::StampedTransform stf;
+                static_tf[i].header.stamp = pc->header.stamp;
+                tf::transformStampedMsgToTF(static_tf[i],stf);
+                m_tfListener.setTransform(stf);
+            }
+
+            std::string error_msg;
+            if (!m_tfListener.canTransform(pc->header.frame_id,m_worldFrameId,pc->header.stamp,&error_msg)) {
+#if 0
+                ROS_INFO("Error: %s",error_msg.c_str());
+#endif
                 pQ1->push_back(pc);
             } else {
                 insertCloudCallback(pc);
@@ -310,8 +337,18 @@ void OctomapServer::processBagFile(const std::string & bagfile, const std::strin
         if (tf != nullptr) {
             for(size_t i=0;i<tf->transforms.size();i++) {
                 tf::StampedTransform stf;
+                if (tf->transforms[i].header.stamp == ros::Time()) {
+                    static_tf.push_back(tf->transforms[i]);
+                }
                 tf::transformStampedMsgToTF(tf->transforms[i],stf);
                 m_tfListener.setTransform(stf);
+#if 0
+                ROS_INFO("Added tf from %s to %s at %f",
+                        tf->transforms[i].header.frame_id.c_str(),
+                        tf->transforms[i].child_frame_id.c_str(),
+                        tf->transforms[i].header.stamp.toSec());
+#endif
+
             }
             continue;
         }
