@@ -28,6 +28,12 @@
  */
 
 #include <octomap_server/OctomapServer.h>
+#include <rosbag/bag.h>
+#include <rosbag/view.h>
+#include <boost/foreach.hpp>
+#include <tf2_msgs/TFMessage.h>
+#define foreach BOOST_FOREACH
+
 
 using namespace octomap;
 using octomap_msgs::Octomap;
@@ -259,6 +265,62 @@ bool OctomapServer::openFile(const std::string& filename){
   return true;
 
 }
+
+void OctomapServer::processBagFile(const std::string & bagfile, const std::string & topic) {
+    rosbag::Bag bag;
+    bag.open(bagfile);  // BagMode is Read by default
+
+    typedef std::list<sensor_msgs::PointCloud2::ConstPtr> PCQ;
+    PCQ Q1, Q2;
+    PCQ *pQ1 = &Q1, *pQ2=&Q2;
+
+
+    size_t counter = 0;
+    ROS_INFO("Processing bag '%s' Topic '%s'",bagfile.c_str(),topic.c_str());
+    for(rosbag::MessageInstance const m: rosbag::View(bag))
+    {
+        pQ2->clear();
+        if (pQ1->size()>2) {
+            ROS_INFO("PQ1 contains %d element",int(pQ1->size()));
+        }
+        for (PCQ::iterator it=pQ1->begin();it!=pQ1->end();it++) {
+            sensor_msgs::PointCloud2::ConstPtr pc = *it;
+            if (!m_tfListener.canTransform(pc->header.frame_id,m_worldFrameId,pc->header.stamp)) {
+                pQ2->push_back(pc);
+            } else {
+                insertCloudCallback(pc);
+            }
+        }
+        std::swap(pQ1,pQ2);
+
+        sensor_msgs::PointCloud2::ConstPtr pc = m.instantiate<sensor_msgs::PointCloud2>();
+        if ((pc != nullptr) && ((m.getTopic()==topic) || topic.empty())) {
+            counter += 1;
+            if (counter % 100 == 0) {
+                ROS_INFO("Processed %d clouds",int(counter));
+            }
+            if (!m_tfListener.canTransform(pc->header.frame_id,m_worldFrameId,pc->header.stamp)) {
+                pQ1->push_back(pc);
+            } else {
+                insertCloudCallback(pc);
+            }
+            continue;
+        }
+        tf2_msgs::TFMessage::ConstPtr tf = m.instantiate<tf2_msgs::TFMessage>();
+        if (tf != nullptr) {
+            for(size_t i=0;i<tf->transforms.size();i++) {
+                tf::StampedTransform stf;
+                tf::transformStampedMsgToTF(tf->transforms[i],stf);
+                m_tfListener.setTransform(stf);
+            }
+            continue;
+        }
+    }
+
+    bag.close();
+    ROS_INFO("Completed bag '%s'",bagfile.c_str());
+}
+
 
 void OctomapServer::insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud){
   ros::WallTime startTime = ros::WallTime::now();

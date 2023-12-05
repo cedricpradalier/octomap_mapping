@@ -77,6 +77,15 @@ int main(int argc, char** argv){
     }
   }
 
+  std::string bagFilename(""), bagTopicname(""); 
+  private_nh.getParam("bag_file", bagFilename);
+  private_nh.getParam("bag_topic", bagTopicname);
+
+  ROS_INFO("Bagfile %s topic %s",bagFilename.c_str(),bagTopicname.c_str());
+  if (bagFilename != "") {
+    server.processBagFile(bagFilename,bagTopicname);
+  }
+
   try{
     ros::spin();
   }catch(std::runtime_error& e){
