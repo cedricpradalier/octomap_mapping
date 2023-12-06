@@ -102,7 +102,7 @@ public:
 
   virtual void insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud);
   virtual bool openFile(const std::string& filename);
-  virtual void processBagFile(const std::string & bagfile, const std::string & topic);
+  virtual void processBagFile(const std::string & bagfile, const std::string & topic, const std::string & mapfile, size_t saveEveryNScans=1000);
 
 protected:
   inline static void updateMinKey(const octomap::OcTreeKey& in, octomap::OcTreeKey& min) {

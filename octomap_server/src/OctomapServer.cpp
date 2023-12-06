@@ -266,7 +266,7 @@ bool OctomapServer::openFile(const std::string& filename){
 
 }
 
-void OctomapServer::processBagFile(const std::string & bagfile, const std::string & topic) {
+void OctomapServer::processBagFile(const std::string & bagfile, const std::string & topic, const std::string & mapfile, size_t saveEveryNScans) {
     rosbag::Bag bag;
     bag.open(bagfile);  // BagMode is Read by default
 
@@ -277,6 +277,7 @@ void OctomapServer::processBagFile(const std::string & bagfile, const std::strin
     std::vector<geometry_msgs::TransformStamped> static_tf;
 
     size_t counter = 0;
+    size_t target = saveEveryNScans;
     ROS_INFO("Processing bag '%s' Topic '%s'",bagfile.c_str(),topic.c_str());
     for(rosbag::MessageInstance const m: rosbag::View(bag))
     {
@@ -313,6 +314,13 @@ void OctomapServer::processBagFile(const std::string & bagfile, const std::strin
             counter += 1;
             if (counter % 100 == 0) {
                 ROS_INFO("Processed %d clouds",int(counter));
+            }
+            if (counter > target) {
+                target += saveEveryNScans;
+                if (!mapfile.empty()) {
+                    m_octree->write(mapfile);
+                    ROS_INFO("Updated map file '%s'",mapfile.c_str());
+                }
             }
 
             for (size_t i=0;i<static_tf.size();i++) {
@@ -356,6 +364,10 @@ void OctomapServer::processBagFile(const std::string & bagfile, const std::strin
 
     bag.close();
     ROS_INFO("Completed bag '%s'",bagfile.c_str());
+    if (!mapfile.empty()) {
+        m_octree->write(mapfile);
+        ROS_INFO("Updated map file '%s'",mapfile.c_str());
+    }
 }
 
 
