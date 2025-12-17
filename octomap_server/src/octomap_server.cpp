@@ -36,6 +36,9 @@
 
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include "rclcpp/serialization.hpp"
+#include "rosbag2_transport/reader_writer_factory.hpp"
+#include "tf2_msgs/msg/tf_message.hpp"
 
 namespace
 {
@@ -61,6 +64,7 @@ OctomapServer::OctomapServer(const rclcpp::NodeOptions & node_options)
   using std::placeholders::_1;
   using std::placeholders::_2;
 
+  bag_file_ = declare_parameter("bag_file", "");
   world_frame_id_ = declare_parameter("frame_id", "map");
   base_frame_id_ = declare_parameter("base_frame_id", "base_footprint");
   use_height_map_ = declare_parameter("use_height_map", false);
@@ -301,20 +305,28 @@ OctomapServer::OctomapServer(const rclcpp::NodeOptions & node_options)
   fmarker_pub_ = create_publisher<MarkerArray>("free_cells_vis_array", qos);
 
   tf2_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
-  auto timer_interface = std::make_shared<tf2_ros::CreateTimerROS>(
-    this->get_node_base_interface(),
-    this->get_node_timers_interface());
-  tf2_buffer_->setCreateTimerInterface(timer_interface);
-  tf2_listener_ =
-    std::make_shared<tf2_ros::TransformListener>(*tf2_buffer_);
+  if (bag_file_.empty()) {
+      auto timer_interface = std::make_shared<tf2_ros::CreateTimerROS>(
+              this->get_node_base_interface(),
+              this->get_node_timers_interface());
+      tf2_buffer_->setCreateTimerInterface(timer_interface);
+      tf2_listener_ =
+          std::make_shared<tf2_ros::TransformListener>(*tf2_buffer_);
 
-  using std::chrono_literals::operator""s;
-  point_cloud_sub_.subscribe(this, "cloud_in", rmw_qos_profile_sensor_data);
-  tf_point_cloud_sub_ = std::make_shared<tf2_ros::MessageFilter<PointCloud2>>(
-    point_cloud_sub_, *tf2_buffer_, world_frame_id_, 5, this->get_node_logging_interface(),
-    this->get_node_clock_interface(), 5s);
+      using std::chrono_literals::operator""s;
+      point_cloud_sub_.subscribe(this, "cloud_in", rmw_qos_profile_sensor_data);
+      tf_point_cloud_sub_ = std::make_shared<tf2_ros::MessageFilter<PointCloud2>>(
+              point_cloud_sub_, *tf2_buffer_, world_frame_id_, 5, this->get_node_logging_interface(),
+              this->get_node_clock_interface(), 5s);
 
-  tf_point_cloud_sub_->registerCallback(&OctomapServer::insertCloudCallback, this);
+      tf_point_cloud_sub_->registerCallback(&OctomapServer::insertCloudCallback, this);
+  } else {
+      tf2_buffer_->setUsingDedicatedThread(true);
+
+      bag_thread_.reset(new std::thread{[this]() {
+              this->processBagFile();
+              }});
+  }
 
   octomap_binary_srv_ = create_service<OctomapSrv>(
     "octomap_binary", std::bind(&OctomapServer::onOctomapBinarySrv, this, _1, _2));
@@ -333,6 +345,12 @@ OctomapServer::OctomapServer(const rclcpp::NodeOptions & node_options)
   if (!openFile(filename)) {
     RCLCPP_WARN(get_logger(), "Could not open file %s", filename.c_str());
   }
+}
+
+OctomapServer::~OctomapServer() {
+    if (bag_thread_) {
+        bag_thread_->join();
+    }
 }
 
 bool OctomapServer::openFile(const std::string & filename)
@@ -392,6 +410,127 @@ bool OctomapServer::openFile(const std::string & filename)
 
   return true;
 }
+
+void OctomapServer::processBagFile(const std::string & bagfile, const std::string & topic) {
+    std::set<std::string> ss;
+    if (topic.empty()) {
+        std::string lidar_topic;
+        this->declare_parameter<std::string>("lidar_topic", "cloud");
+        this->get_parameter("lidar_topic", lidar_topic);
+        ss.insert(lidar_topic);
+    } else {
+        ss.insert(topic);
+    }
+    processBagFile(bagfile,ss);
+}
+
+
+void OctomapServer::processBagFile(const std::string & bfile, const std::set<std::string> & topics) {
+    int debug_num_scan = -1;
+    std::string tf_topic, tf_static_topic;
+    std::string bagfile(bfile);
+    if (bagfile.empty()) {
+        bagfile = bag_file_;
+    }
+    // Declared in transform_align
+    this->declare_parameter<int>("debug_num_scan", -1);
+    this->declare_parameter<std::string>("tf_topic", "/tf");
+    this->declare_parameter<std::string>("tf_static_topic", "/tf_static");
+    this->get_parameter("debug_num_scan", debug_num_scan);
+    this->get_parameter("tf_topic", tf_topic);
+    this->get_parameter("tf_static_topic", tf_static_topic);
+    rclcpp::Serialization<sensor_msgs::msg::PointCloud2> pc_serialization;
+    rclcpp::Serialization<tf2_msgs::msg::TFMessage> tf2_serialization;
+    std::unique_ptr<rosbag2_cpp::Reader> reader;
+    rosbag2_storage::StorageOptions storage_options;
+    storage_options.uri = bagfile;
+    reader = rosbag2_transport::ReaderWriterFactory::make_reader(storage_options);
+    reader->open(storage_options);
+
+    typedef std::list<sensor_msgs::msg::PointCloud2::SharedPtr> PCQ;
+    PCQ Q1, Q2;
+    PCQ *pQ1 = &Q1, *pQ2=&Q2;
+
+    typedef std::pair<std::string,std::string> StaticTfKey;
+    typedef std::map<StaticTfKey,geometry_msgs::msg::TransformStamped> StaticTfMap;
+    StaticTfMap static_tf;
+
+    size_t counter = 0;
+    RCLCPP_INFO(this->get_logger(),"Processing bag '%s'",bagfile.c_str());
+    for(auto s=topics.begin();s!=topics.end();s++) {
+        RCLCPP_INFO(this->get_logger(),"Topic: %s",s->c_str());
+    }
+    while (reader->has_next()) {
+        if (!rclcpp::ok()) {
+            break;
+        }
+        rosbag2_storage::SerializedBagMessageSharedPtr msg = reader->read_next();
+        rclcpp::SerializedMessage serialized_msg(*msg->serialized_data);
+        if (msg->topic_name == tf_static_topic) {
+            tf2_msgs::msg::TFMessage::SharedPtr ros_msg = std::make_shared<tf2_msgs::msg::TFMessage>();
+            tf2_serialization.deserialize_message(&serialized_msg, ros_msg.get());
+            for(size_t i=0;i<ros_msg->transforms.size();i++) {
+                const geometry_msgs::msg::TransformStamped & T = ros_msg->transforms[i];
+                StaticTfKey key(T.header.frame_id,T.child_frame_id);
+                auto it = static_tf.find(key);
+                if (it==static_tf.end()) {
+                    static_tf[key] = T;
+                }
+            }
+        } else if (msg->topic_name == tf_topic) {
+            tf2_msgs::msg::TFMessage::SharedPtr ros_msg = std::make_shared<tf2_msgs::msg::TFMessage>();
+            tf2_serialization.deserialize_message(&serialized_msg, ros_msg.get());
+            rclcpp::Time tlatest;
+            for(size_t i=0;i<ros_msg->transforms.size();i++) {
+                const geometry_msgs::msg::TransformStamped & T = ros_msg->transforms[i];
+                tf2_buffer_->setTransform(T,"bagreader",true);
+                rclcpp::Time theader(T.header.stamp);
+                if (theader.seconds() > tlatest.seconds()) {
+                    tlatest = theader;
+                }
+            }
+            for (StaticTfMap::iterator it=static_tf.begin();it!=static_tf.end();it++) {
+                it->second.header.stamp = tlatest;
+                tf2_buffer_->setTransform(it->second,"bagreader",true);
+            }
+            pQ2->clear();
+            for (auto it=pQ1->begin();it!=pQ1->end();it++) {
+                if (tf2_buffer_->canTransform( world_frame_id_, (*it)->header.frame_id, (*it)->header.stamp)) {
+                    insertCloudCallback(*it);
+                } else {
+                    pQ2->push_back(*it);
+                }
+            }
+            std::swap(pQ1,pQ2);
+        } else if (topics.find(msg->topic_name) != topics.end()) {
+            counter += 1;
+            if (counter % 1 == 0) {
+                RCLCPP_INFO(this->get_logger(),"Processed %d clouds",int(counter));
+            }
+            sensor_msgs::msg::PointCloud2::SharedPtr ros_msg = std::make_shared<sensor_msgs::msg::PointCloud2>();
+            pc_serialization.deserialize_message(&serialized_msg, ros_msg.get());
+            for (StaticTfMap::iterator it=static_tf.begin();it!=static_tf.end();it++) {
+                it->second.header.stamp = ros_msg->header.stamp;
+                tf2_buffer_->setTransform(it->second,"bagreader",true);
+            }
+            if (tf2_buffer_->canTransform( world_frame_id_, ros_msg->header.frame_id, ros_msg->header.stamp)) {
+                insertCloudCallback(ros_msg);
+            } else {
+                pQ1->push_back(ros_msg);
+            }
+            if ((debug_num_scan>0) && (int(counter) >= debug_num_scan)) {
+                RCLCPP_WARN(this->get_logger(),"Exiting bag processing due to debug counter");
+                break;
+            }
+        }
+    }
+
+    reader->close();
+    RCLCPP_INFO(this->get_logger(),"Completed bag '%s'",bagfile.c_str());
+}
+
+
+
 
 void OctomapServer::insertCloudCallback(const PointCloud2::ConstSharedPtr cloud)
 {

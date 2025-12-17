@@ -106,6 +106,7 @@ public:
   using ResetSrv = std_srvs::srv::Empty;
 
   explicit OctomapServer(const rclcpp::NodeOptions & node_options);
+  ~OctomapServer();
   virtual bool onOctomapBinarySrv(
     const std::shared_ptr<OctomapSrv::Request> req,
     const std::shared_ptr<OctomapSrv::Response> res);
@@ -121,8 +122,13 @@ public:
 
   virtual void insertCloudCallback(const PointCloud2::ConstSharedPtr cloud);
   virtual bool openFile(const std::string & filename);
+  void processBagFile(const std::string & bagfile=std::string(), const std::string & topic=std::string());
+  void processBagFile(const std::string & bagfile, const std::set<std::string> & topics);
 
 protected:
+  std::shared_ptr<std::thread> bag_thread_;
+
+
   inline static void updateMinKey(const octomap::OcTreeKey & in, octomap::OcTreeKey & min)
   {
     for (size_t i = 0; i < 3; ++i) {
@@ -269,6 +275,7 @@ protected:
   ColorRGBA color_free_;
   double color_factor_;
 
+  std::string bag_file_;
   bool latched_topics_;
   bool publish_free_space_;
 
