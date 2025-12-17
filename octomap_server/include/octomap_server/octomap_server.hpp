@@ -276,6 +276,7 @@ protected:
   double color_factor_;
 
   std::string bag_file_;
+  bool publish_on_insert_;
   bool latched_topics_;
   bool publish_free_space_;
 

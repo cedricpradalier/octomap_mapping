@@ -64,6 +64,7 @@ OctomapServer::OctomapServer(const rclcpp::NodeOptions & node_options)
   using std::placeholders::_1;
   using std::placeholders::_2;
 
+  publish_on_insert_ = true;
   bag_file_ = declare_parameter("bag_file", "");
   world_frame_id_ = declare_parameter("frame_id", "map");
   base_frame_id_ = declare_parameter("base_frame_id", "base_footprint");
@@ -464,6 +465,7 @@ void OctomapServer::processBagFile(const std::string & bfile, const std::set<std
         if (!rclcpp::ok()) {
             break;
         }
+        publish_on_insert_ = ((counter%10)==0);
         rosbag2_storage::SerializedBagMessageSharedPtr msg = reader->read_next();
         rclcpp::SerializedMessage serialized_msg(*msg->serialized_data);
         if (msg->topic_name == tf_static_topic) {
@@ -504,7 +506,7 @@ void OctomapServer::processBagFile(const std::string & bfile, const std::set<std
             std::swap(pQ1,pQ2);
         } else if (topics.find(msg->topic_name) != topics.end()) {
             counter += 1;
-            if (counter % 1 == 0) {
+            if (counter % 10 == 0) {
                 RCLCPP_INFO(this->get_logger(),"Processed %d clouds",int(counter));
             }
             sensor_msgs::msg::PointCloud2::SharedPtr ros_msg = std::make_shared<sensor_msgs::msg::PointCloud2>();
@@ -627,7 +629,9 @@ void OctomapServer::insertCloudCallback(const PointCloud2::ConstSharedPtr cloud)
     "Pointcloud insertion in OctomapServer done (%zu+%zu pts (ground/nonground), %f sec)",
     pc_ground.size(), pc_nonground.size(), total_elapsed);
 
-  publishAll(cloud->header.stamp);
+  if (publish_on_insert_) {
+      publishAll(cloud->header.stamp);
+  }
 }
 
 void OctomapServer::insertScan(
